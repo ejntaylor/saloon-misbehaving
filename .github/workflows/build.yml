@@ -1,0 +1,83 @@
+name: Web Build & Test (Deploy if mainline)
+
+on:
+  push:
+    branches:
+      - mainline
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  id-token: write
+  pull-requests: write
+  contents: write
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-20.04
+    defaults:
+      run:
+        shell: bash
+    services:
+      mysql:
+        image: mysql:5.7
+        env:
+          MYSQL_ROOT_PASSWORD: password
+          MYSQL_DATABASE: test
+        ports:
+          - 33306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Get Composer Cache Directory
+        id: composer-cache
+        run: |
+          echo "::set-output name=dir::$(composer config cache-files-dir)"
+
+      - name: php cache
+        uses: actions/cache@v3
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+
+      - name: npm cache
+        if: ${{ matrix.requires_npm }}
+        uses: actions/cache@v3
+        with:
+          path: "**/node_modules"
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+
+      - name: Setup PHP with PECL extension
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.1"
+          coverage: xdebug
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.7"
+
+      - name: Install Dependencies
+        id: install-dependencies
+        run: |
+          composer self-update --2
+          composer config -g github-oauth.github.com ${{ secrets.STRATUS_GITHUB_TOKEN }}
+          composer config -g http-basic.nova.laravel.com "${{ secrets.STRATUS_NOVA4_USERNAME }}" "${{ secrets.STRATUS_NOVA4_PASSWORD }}"
+          composer install --prefer-dist --no-interaction
+
+      - name: Setup Environment
+        id: setup-environment
+        run: |
+          export APP_ENV=testing
+          cp .env.ci .env
+
+      - name: Test
+        id: test-stack
+        run: |
+          ./vendor/bin/phpstan analyse -l 2
+          ./vendor/bin/phpunit --coverage-clover clover.xml --stop-on-failure
+          php coverage-checker.php clover.xml 75
